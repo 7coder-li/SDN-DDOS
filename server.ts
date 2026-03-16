@@ -262,15 +262,19 @@ async function startServer() {
         const key = `${flow.src}-${flow.dst}`;
         const last = lastFlowStats.get(key);
         let pps = 0;
+        let packetDelta = 0;
         
         if (last) {
           const timeDiff = (now - last.time) / 1000;
-          if (timeDiff >= 1.0) { 
-            // 至少间隔 1 秒才重新计算，防止 React StrictMode 或多标签页导致的极小 timeDiff 引起 PPS 爆炸
-            pps = Math.max(0, (flow.packets - last.packets) / timeDiff);
+          packetDelta = Math.max(0, flow.packets - last.packets);
+
+          // 只要有有效时间差就重新计算，避免 1s 阈值导致前端长期显示 0
+          if (timeDiff > 0) {
+            pps = packetDelta / timeDiff;
+            // 限制极端值，避免偶发极小 timeDiff 带来的尖峰污染图表
+            pps = Math.min(pps, 1_000_000);
             lastFlowStats.set(key, { packets: flow.packets, time: now, lastPps: pps });
           } else {
-            // 间隔太短，复用上次的 PPS，不更新时间，等待下一次轮询
             pps = last.lastPps || 0;
           }
         } else {
@@ -294,7 +298,8 @@ async function startServer() {
           'Average Packet Size': avgSize
         };
         const classificationPromise = classifyTraffic(features);
-        const isActive = pps > 0.001; // 进一步降低阈值，捕捉极其微弱的流量
+        // 只要计数有增长或速率大于 0 就视为活跃，避免边缘时间差造成活跃流量被错误标记为 idle
+        const isActive = packetDelta > 0 || pps > 0;
 
         // 发现新主机
         if (flow.src && flow.src.length > 5 && !flow.src.startsWith('Port-') && !persistentHosts.has(flow.src)) {
