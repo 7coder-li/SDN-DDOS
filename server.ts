@@ -278,11 +278,22 @@ async function startServer() {
         const key = `${flow.src}-${flow.dst}`;
         const last = lastFlowStats.get(key);
         let pps = 0;
+        let packetDelta = 0;
         
         if (last) {
           const timeDiff = (now - last.time) / 1000;
+<<<<<<< HEAD
           if (timeDiff >= 0.8) { // 稍微降低阈值到 0.8s，增加容错
             pps = Math.max(0, (flow.packets - last.packets) / timeDiff);
+=======
+          packetDelta = Math.max(0, flow.packets - last.packets);
+
+          // 只要有有效时间差就重新计算，避免 1s 阈值导致前端长期显示 0
+          if (timeDiff > 0) {
+            pps = packetDelta / timeDiff;
+            // 限制极端值，避免偶发极小 timeDiff 带来的尖峰污染图表
+            pps = Math.min(pps, 1_000_000);
+>>>>>>> 2dbfb9860fdbb8be26f2b31891077993b432bbc2
             lastFlowStats.set(key, { packets: flow.packets, time: now, lastPps: pps });
             if (pps > 0) {
                // console.log(`📈 [Flow] ${key}: packets ${last.packets} -> ${flow.packets}, pps: ${pps.toFixed(2)}`);
@@ -308,8 +319,13 @@ async function startServer() {
           'Average Packet Size': avgSize
         };
         const classificationPromise = classifyTraffic(features);
+<<<<<<< HEAD
         const isActive = pps > 0.1; // 提高活跃判定阈值到 0.1 PPS，过滤极微弱波动
         if (isActive) activeFlowCount++;
+=======
+        // 只要计数有增长或速率大于 0 就视为活跃，避免边缘时间差造成活跃流量被错误标记为 idle
+        const isActive = packetDelta > 0 || pps > 0;
+>>>>>>> 2dbfb9860fdbb8be26f2b31891077993b432bbc2
 
         // 发现新主机
         if (flow.src && flow.src.length > 5 && !flow.src.startsWith('Port-') && !persistentHosts.has(flow.src)) {
