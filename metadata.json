@@ -1,0 +1,5 @@
+{
+  "name": "SDN DDoS Detection & Mitigation System",
+  "description": "A machine learning-based system for detecting and mitigating DDoS attacks in SDN environments, featuring real-time traffic monitoring and automated flow control.",
+  "requestFramePermissions": []
+}
