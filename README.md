@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 <div align="center">
 <img width="1200" height="475" alt="GHBanner" src="https://github.com/user-attachments/assets/0aa67016-6eaf-458a-adb2-6e31a0763ed6" />
 </div>
@@ -18,3 +19,6 @@ View your app in AI Studio: https://ai.studio/apps/4f89f1d7-900c-4db2-9afb-4c67f
 2. Set the `GEMINI_API_KEY` in [.env.local](.env.local) to your Gemini API key
 3. Run the app:
    `npm run dev`
+=======
+# SDN-DDOS
+>>>>>>> ead16fdafc4da7cb63faf1eac554d9a5584fac05

@@ -2,69 +2,82 @@ import express from "express";
 import { createServer as createViteServer } from "vite";
 import path from "path";
 import { fileURLToPath } from 'url';
-import fetch from "node-fetch";
 import dotenv from "dotenv";
-import fs from "fs";
 import { initMLEngine, predict } from './src/mlEngine';
+
+dotenv.config();
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-console.log(`📂 [Config] CWD: ${process.cwd()}`);
-const envPath = path.resolve(process.cwd(), ".env");
-if (fs.existsSync(envPath)) {
-  const envContent = fs.readFileSync(envPath, "utf-8");
-  console.log("📄 [Config] .env file found. Content length:", envContent.length);
-  envContent.split("\n").forEach(line => {
-    const [key, ...valueParts] = line.split("=");
-    if (key && valueParts.length > 0) {
-      const value = valueParts.join("=").replace(/["']/g, "").trim();
-      process.env[key.trim()] = value;
-      console.log(`✅ [Config] Set ${key.trim()} from .env`);
-    }
-  });
-} else {
-  console.log("❌ [Config] .env file NOT found at", envPath);
-}
+const RYU_URL = process.env.RYU_CONTROLLER_URL || "http://127.0.0.1:8080";
+const MININET_URL = process.env.MININET_CONTROL_URL || "http://127.0.0.1:5000";
 
-dotenv.config(); // Still call it just in case
-
-console.log("🛠️ [Config] Environment variables loaded.");
-console.log(`🔗 [Config] RYU_CONTROLLER_URL: ${process.env.RYU_CONTROLLER_URL || "NOT SET"}`);
+const ATTACK_CONFIGS: Record<string, any> = {
+  'SYN_FLOOD': { 
+    src: "10.0.0.1", 
+    dst: "10.0.0.100", 
+    pps: 15000, 
+    avgSize: 64,
+    host: "h_a1",
+    startCmd: "hping3 -S -p 80 --flood 10.0.0.100",
+    stopCmd: "pkill -f hping3"
+  },
+  'UDP_FLOOD': { 
+    src: "10.0.0.2", 
+    dst: "10.0.0.100", 
+    pps: 12000, 
+    avgSize: 512,
+    host: "h_a2",
+    startCmd: "hping3 --udp -p 53 --flood 10.0.0.100",
+    stopCmd: "pkill -f hping3"
+  },
+  'DNS_REFLECTION': { 
+    src: "10.0.0.3", 
+    dst: "10.0.0.100", 
+    pps: 8000, 
+    avgSize: 1024,
+    host: "h_a3",
+    startCmd: "hping3 --udp -p 53 -d 1000 --flood 10.0.0.100",
+    stopCmd: "pkill -f hping3"
+  },
+  'HTTP_FLOOD': { 
+    src: "10.0.0.4", 
+    dst: "10.0.0.100", 
+    pps: 3000, 
+    avgSize: 1460,
+    host: "h_a4",
+    startCmd: "hping3 -S -p 80 -d 1200 --flood 10.0.0.100",
+    stopCmd: "pkill -f hping3"
+  },
+};
 
 async function startServer() {
-  // 1. 初始化 ML 引擎
   await initMLEngine();
 
   const app = express();
   const PORT = 3000;
 
-  console.log("🛠️ [Config] RYU_CONTROLLER_URL:", process.env.RYU_CONTROLLER_URL || "NOT SET");
-
   app.use(express.json());
 
   // --- 状态存储 ---
-  let blockedFlows: Set<string> = new Set(); // 存储被拦截的流量特征 (src-dst)
-  let activeAttacks: Set<string> = new Set(); // 存储正在进行的攻击类型
+  let blockedFlows: Set<string> = new Set();
+  let activeAttacks: Set<string> = new Set();
   let lastFlowStats: Map<string, { packets: number, time: number, lastPps?: number }> = new Map();
-  let lastLoggedAttack: Map<string, number> = new Map(); // 记录上次记录攻击日志的时间，防止刷屏
+  let lastLoggedAttack: Map<string, number> = new Map();
   let systemLogs: { id: string, timestamp: number, type: 'info' | 'warn' | 'error' | 'attack', message: string }[] = [];
-  let persistentHosts: Set<string> = new Set(["10.0.0.1", "10.0.0.2", "10.0.0.3", "10.0.0.4", "10.0.0.5"]);
+  let persistentHosts: Set<string> = new Set(["10.0.0.1", "10.0.0.2", "10.0.0.3", "10.0.0.4", "10.0.0.100"]);
 
   const addLog = (type: 'info' | 'warn' | 'error' | 'attack', message: string) => {
     const log = { id: Math.random().toString(36).substr(2, 9), timestamp: Date.now(), type, message };
     systemLogs.push(log);
     if (systemLogs.length > 50) systemLogs.shift();
-    console.log(`[LOG] ${type.toUpperCase()}: ${message}`);
   };
 
   addLog('info', 'SDN 安全监控系统已启动');
 
-  // --- 本地机器学习模型 ---
   const classifyTraffic = async (features: any) => {
     try {
-      // 特征顺序必须与训练时一致:
-      // ['Protocol', 'Flow Duration', 'Total Fwd Packets', 'Total Length of Fwd Packets', 'Total Backward Packets', 'Total Length of Bwd Packets', 'Average Packet Size']
       const featureArray = [
         features['Protocol'] || 0,
         features['Flow Duration'] || 0,
@@ -77,11 +90,9 @@ async function startServer() {
       
       const isAttack = await predict(featureArray);
       const isAttackBool = isAttack === 1;
-      const attackProbability = 0.95; // 简化概率
 
       let attackType = "DDoS_ATTACK";
       if (isAttackBool) {
-          // 根据特征推断具体的攻击类型，以便前端显示
           const proto = features['Protocol'];
           const avgSize = features['Average Packet Size'];
           if (proto === 6 && avgSize < 120) attackType = "SYN_FLOOD";
@@ -91,10 +102,9 @@ async function startServer() {
       }
       return {
         type: isAttackBool ? attackType : "NORMAL",
-        confidence: attackProbability
+        confidence: 0.95
       };
     } catch (e) {
-      console.error("[ML Engine] 推理失败:", e);
       return { type: "NORMAL", confidence: 0 };
     }
   };
@@ -211,9 +221,11 @@ async function startServer() {
       }
 
       const now = Date.now();
+      let activeFlowCount = 0;
+      let totalPacketsInAllFlows = 0;
 
       // 聚合流表 (按 src-dst)，防止多条同源同目的流表互相覆盖导致 PPS 爆炸
-      const flowMap = new Map<string, { packets: number, bytes: number, src: string, dst: string, isBlocked: boolean }>();
+      const flowMap = new Map<string, { packets: number, bytes: number, src: string, dst: string, isBlocked: boolean, proto: any, duration: number }>();
       
       rawFlows.forEach((f: any) => {
         if (!f.match) return;
@@ -226,12 +238,14 @@ async function startServer() {
           return;
         }
 
+        const cleanIp = (ip: string) => ip ? ip.split('/')[0] : ip;
+
         const macToIp = (mac: string) => {
-          if (mac && mac.startsWith('00:00:00:00:00:')) {
+          if (mac && mac.includes(':') && mac.startsWith('00:00:00:00:00:')) {
             const hex = mac.split(':').pop();
             if (hex) return `10.0.0.${parseInt(hex, 16)}`;
           }
-          return mac;
+          return cleanIp(mac);
         };
 
         const src = macToIp(rawSrc);
@@ -246,6 +260,8 @@ async function startServer() {
         const durationUs = duration_sec * 1000000 + duration_nsec / 1000;
         const isBlocked = blockedFlows.has(key) || f.priority === 65535;
 
+        totalPacketsInAllFlows += packets;
+
         if (flowMap.has(key)) {
           const existing = flowMap.get(key)!;
           existing.packets += packets;
@@ -258,43 +274,42 @@ async function startServer() {
         }
       });
 
-      let processedFlows = Array.from(flowMap.values()).map((flow) => {
+      const processedFlowsPromises = Array.from(flowMap.values()).map((flow) => {
         const key = `${flow.src}-${flow.dst}`;
         const last = lastFlowStats.get(key);
         let pps = 0;
         
         if (last) {
           const timeDiff = (now - last.time) / 1000;
-          if (timeDiff >= 1.0) { 
-            // 至少间隔 1 秒才重新计算，防止 React StrictMode 或多标签页导致的极小 timeDiff 引起 PPS 爆炸
+          if (timeDiff >= 0.8) { // 稍微降低阈值到 0.8s，增加容错
             pps = Math.max(0, (flow.packets - last.packets) / timeDiff);
             lastFlowStats.set(key, { packets: flow.packets, time: now, lastPps: pps });
+            if (pps > 0) {
+               // console.log(`📈 [Flow] ${key}: packets ${last.packets} -> ${flow.packets}, pps: ${pps.toFixed(2)}`);
+            }
           } else {
-            // 间隔太短，复用上次的 PPS，不更新时间，等待下一次轮询
             pps = last.lastPps || 0;
           }
         } else {
-          // 第一次获取该流表，无法计算瞬时速率，记为 0，等待下一次轮询计算真实的增量
           pps = 0;
           lastFlowStats.set(key, { packets: flow.packets, time: now, lastPps: 0 });
         }
 
         const avgSize = flow.packets > 0 ? flow.bytes / flow.packets : 64;
-        const flowDurationUs = flow.duration > 0 ? flow.duration : 1000000.0; // 避免除以 0
+        const flowDurationUs = flow.duration > 0 ? flow.duration : 1000000.0; 
         
-        // 构造完全符合 CICDDoS2019 数据集格式的特征
-        // 数据集中的特征是基于整个流的生命周期的累计值，而不是瞬时速率
         const features = {
           'Protocol': flow.proto,
           'Flow Duration': flowDurationUs, 
-          'Total Fwd Packets': flow.packets, // 累计发包数
-          'Total Length of Fwd Packets': flow.bytes, // 累计字节数
-          'Total Backward Packets': 0, // 简化处理，假设攻击流单向
+          'Total Fwd Packets': flow.packets, 
+          'Total Length of Fwd Packets': flow.bytes, 
+          'Total Backward Packets': 0, 
           'Total Length of Bwd Packets': 0,
           'Average Packet Size': avgSize
         };
         const classificationPromise = classifyTraffic(features);
-        const isActive = pps > 0.001; // 进一步降低阈值，捕捉极其微弱的流量
+        const isActive = pps > 0.1; // 提高活跃判定阈值到 0.1 PPS，过滤极微弱波动
+        if (isActive) activeFlowCount++;
 
         // 发现新主机
         if (flow.src && flow.src.length > 5 && !flow.src.startsWith('Port-') && !persistentHosts.has(flow.src)) {
@@ -319,7 +334,11 @@ async function startServer() {
         }));
       });
 
-      processedFlows = await Promise.all(processedFlows);
+      let processedFlows = await Promise.all(processedFlowsPromises);
+      
+      if (activeFlowCount > 0) {
+        console.log(`🚀 [Monitor] Active Flows: ${activeFlowCount}, Total Packets: ${totalPacketsInAllFlows}`);
+      }
 
       // 过滤往返流量，只保留单向流量（PPS 较大的那个），防止 ping/hping3 显示两条
       processedFlows = processedFlows.filter((flow: any, index: number, self: any[]) => {
@@ -452,7 +471,7 @@ async function startServer() {
             try {
                 const logRes = await fetch(`${MININET_URL}/logs`);
                 if (logRes.ok) {
-                    const logData = await logRes.json();
+                    const logData = await logRes.json() as any;
                     if (logData.logs && logData.logs.includes('[ERROR]')) {
                         // 提取最后一条错误信息
                         const lines = logData.logs.split('\n');
